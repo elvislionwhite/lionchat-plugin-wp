@@ -108,17 +108,19 @@ function lion_get_ajax_creds() {
 // ============================================================
 // UTM TRACKING: Captura parametros da URL e salva em cookie (frontend publico)
 // ============================================================
-define( 'LION_UTM_KEYS', [
-    'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
-    'gclid', 'gbraid', 'wbraid', 'fbclid',
-    'ctwa_clid', 'ctwa_source_id', 'ctwa_source_url', 'ctwa_source_type',
-]);
+function lion_get_utm_keys() {
+    return array(
+        'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
+        'gclid', 'gbraid', 'wbraid', 'fbclid',
+        'ctwa_clid', 'ctwa_source_id', 'ctwa_source_url', 'ctwa_source_type'
+    );
+}
 
 add_action( 'wp_head', function() {
     ?>
     <script>
     (function() {
-        var keys = <?php echo wp_json_encode( LION_UTM_KEYS ); ?>;
+        var keys = <?php echo json_encode( lion_get_utm_keys() ); ?>;
         var params = new URLSearchParams(window.location.search);
         var secure = location.protocol === 'https:' ? ';Secure' : '';
         var expires = new Date(Date.now() + 30*24*60*60*1000).toUTCString();
@@ -154,7 +156,7 @@ function lion_get_utm_from_cookie() {
     if ( ! is_array( $data ) ) return [];
     $clean = [];
     foreach ( $data as $key => $value ) {
-        if ( in_array( $key, LION_UTM_KEYS, true ) && ! empty( $value ) ) {
+        if ( in_array( $key, lion_get_utm_keys(), true ) && ! empty( $value ) ) {
             $clean[ $key ] = sanitize_text_field( $value );
         }
     }
