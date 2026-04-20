@@ -2,7 +2,7 @@
 /**
  * Plugin Name: LionChat Lead Integrator
  * Description: Integração nativa WordPress/Elementor com o LionChat — tags, inboxes, respostas prontas, templates WhatsApp Cloud API, automações e mensagens automáticas.
- * Version: 2.5
+ * Version: 2.6
  * Author: LionChat
  * Author URI: https://lionchat.com.br
  * Text Domain: lionchat-lead
@@ -10,7 +10,7 @@
 
 if ( ! defined( 'ABSPATH' ) ) exit;
 
-define( 'LION_VERSION', '2.5' );
+define( 'LION_VERSION', '2.6' );
 
 // ============================================================
 // LOGO SVG (inline, usado no menu e header)
@@ -142,8 +142,51 @@ add_action( 'wp_head', function() {
             document.cookie = 'lion_utm=' + encodeURIComponent(JSON.stringify(existing)) + ';expires=' + expires + ';path=/;SameSite=Lax' + secure;
         }
     })();
+
+    // AIDEV-NOTE: Integração LionTrack — quando formulário é submetido,
+    // chama LionTrack.identify() pra vincular o visitor ao contato que o plugin vai criar.
+    document.addEventListener('submit', function(e) {
+        if (!window.LionTrack || !window.LionTrack.identify) return;
+        var form = e.target;
+        if (!form || form.tagName !== 'FORM') return;
+        var data = {};
+        var inputs = form.querySelectorAll('input, select, textarea');
+        for (var i = 0; i < inputs.length; i++) {
+            var el = inputs[i];
+            var name = (el.name || el.id || el.placeholder || '').toLowerCase();
+            var val = (el.value || '').trim();
+            if (!val) continue;
+            if (/mail/.test(name) && val.indexOf('@') > 0) data.email = val;
+            else if (/tel|cel|whats|fone|phone/.test(name)) data.phone = val;
+            else if (/nom|name|user|full/.test(name) && !data.name) data.name = val;
+        }
+        if (data.email || data.phone) {
+            window.LionTrack.identify(data);
+        }
+    }, true);
     </script>
     <?php
+
+    // AIDEV-NOTE: LionTrack — injeta pixel de rastreamento se toggle ativado
+    if ( get_option( 'lion_liontrack_enabled' ) === '1' ) {
+        $url = rtrim( get_option( 'lion_url', 'https://app.lionchat.com.br' ), '/' );
+        $acc = get_option( 'lion_acc' );
+        $token = get_option( 'lion_token' );
+        // Busca o liontrack_token da conta via API (cacheado por 1 hora)
+        $lt_token = get_transient( 'lion_liontrack_token' );
+        if ( false === $lt_token && ! empty( $url ) && ! empty( $acc ) && ! empty( $token ) ) {
+            $res = lion_api( 'GET', '' );
+            if ( ! is_wp_error( $res ) ) {
+                $lt_token = $res['liontrack_token'] ?? '';
+                set_transient( 'lion_liontrack_token', $lt_token, HOUR_IN_SECONDS );
+            }
+        }
+        if ( ! empty( $lt_token ) ) {
+            ?>
+            <script src="<?php echo esc_url( $url . '/liontrack.js' ); ?>" onload="LionTrack.init({ token: '<?php echo esc_attr( $lt_token ); ?>' })"></script>
+            <?php
+        }
+    }
 });
 
 /**
@@ -176,7 +219,7 @@ add_action( 'admin_menu', function() {
 // REGISTER SETTINGS
 // ============================================================
 add_action( 'admin_init', function() {
-    foreach ( [ 'lion_url', 'lion_acc', 'lion_token', 'lion_inbox', 'lion_outbox', 'lion_custom_rules' ] as $o ) {
+    foreach ( [ 'lion_url', 'lion_acc', 'lion_token', 'lion_inbox', 'lion_outbox', 'lion_custom_rules', 'lion_liontrack_enabled' ] as $o ) {
         register_setting( 'lion_opts_group', $o );
     }
 });
@@ -644,6 +687,19 @@ function lion_render_main_page() {
                     Atualizar Inboxes
                 </button>
                 <span id="lion-inbox-status" class="lion-inline-status"></span>
+            </div>
+
+            <!-- LIONTRACK -->
+            <div class="lion-card">
+                <h2 class="lion-card-title"><span class="dashicons dashicons-chart-area"></span> LionTrack — Rastreamento de Visitantes</h2>
+                <p class="lion-card-desc">Rastreie automaticamente o comportamento dos visitantes no site: páginas visitadas, tempo em cada página, origem da visita e presença online em tempo real.</p>
+                <div class="lion-field">
+                    <label style="display: flex; align-items: center; gap: 10px; cursor: pointer;">
+                        <input type="checkbox" name="lion_liontrack_enabled" value="1" <?php checked( get_option( 'lion_liontrack_enabled' ), '1' ); ?> style="width: 18px; height: 18px;" />
+                        <span>Ativar rastreamento de visitantes</span>
+                    </label>
+                    <div class="hint">Quando ativado, o script LionTrack será carregado automaticamente em todas as páginas do site. Os dados de navegação aparecem no painel lateral da conversa no LionChat. A conta precisa ter o módulo LionTrack liberado.</div>
+                </div>
             </div>
 
             <!-- REGRAS -->
