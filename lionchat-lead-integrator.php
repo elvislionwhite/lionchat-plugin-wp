@@ -661,6 +661,24 @@ function lion_render_main_page() {
             </div>
 
             <!-- LIONTRACK -->
+            <?php
+            // AIDEV-NOTE: Verifica se a conta tem a feature liontrack ativa via API (cacheado 1h)
+            $lt_available = get_transient( 'lion_liontrack_available' );
+            if ( false === $lt_available ) {
+                $lt_available = '0';
+                $acc_data = lion_api( 'GET', '' );
+                if ( ! is_wp_error( $acc_data ) ) {
+                    $features = $acc_data['features'] ?? [];
+                    // features pode ser dict {"liontrack": true} ou array ["liontrack"]
+                    $has_lt = isset( $features['liontrack'] ) ? (bool) $features['liontrack'] : in_array( 'liontrack', (array) $features );
+                    if ( $has_lt ) {
+                        $lt_available = '1';
+                    }
+                }
+                set_transient( 'lion_liontrack_available', $lt_available, HOUR_IN_SECONDS );
+            }
+            ?>
+            <?php if ( $lt_available === '1' ) : ?>
             <div class="lion-card">
                 <h2 class="lion-card-title"><span class="dashicons dashicons-chart-area"></span> LionTrack — Rastreamento de Visitantes</h2>
                 <p class="lion-card-desc">Rastreie automaticamente o comportamento dos visitantes no site: páginas visitadas, tempo em cada página, origem da visita e presença online em tempo real.</p>
@@ -674,9 +692,10 @@ function lion_render_main_page() {
                         </span>
                         <span style="font-weight:500;"><?php echo $lt_on ? 'Rastreamento ativado' : 'Rastreamento desativado'; ?></span>
                     </label>
-                    <div class="hint" style="margin-top:8px;">Quando ativado, o script LionTrack é carregado automaticamente em todas as páginas do site. Os dados aparecem no painel lateral da conversa no LionChat. A conta precisa ter o módulo LionTrack liberado.</div>
+                    <div class="hint" style="margin-top:8px;">Quando ativado, o script LionTrack é carregado automaticamente em todas as páginas do site.</div>
                 </div>
             </div>
+            <?php endif; ?>
             <style>
                 .lion-toggle-on { background: #22c55e !important; }
                 .lion-toggle-on span { left: 22px !important; }
