@@ -660,6 +660,30 @@ function lion_render_main_page() {
                 <span id="lion-conn-status" class="lion-inline-status"></span>
             </div>
 
+            <!-- LIONTRACK -->
+            <div class="lion-card">
+                <h2 class="lion-card-title"><span class="dashicons dashicons-chart-area"></span> LionTrack — Rastreamento de Visitantes</h2>
+                <p class="lion-card-desc">Rastreie automaticamente o comportamento dos visitantes no site: páginas visitadas, tempo em cada página, origem da visita e presença online em tempo real.</p>
+                <div class="lion-field">
+                    <label style="display: flex; align-items: center; gap: 12px; cursor: pointer;">
+                        <?php $lt_on = get_option( 'lion_liontrack_enabled' ) === '1'; ?>
+                        <input type="hidden" name="lion_liontrack_enabled" value="0" />
+                        <input type="checkbox" name="lion_liontrack_enabled" value="1" id="lion_liontrack_toggle" <?php checked( $lt_on ); ?> style="display:none;" />
+                        <span onclick="document.getElementById('lion_liontrack_toggle').click(); this.classList.toggle('lion-toggle-on');" class="lion-toggle <?php echo $lt_on ? 'lion-toggle-on' : ''; ?>" style="display:inline-block; width:44px; height:24px; border-radius:12px; background:<?php echo $lt_on ? '#22c55e' : '#94a3b8'; ?>; position:relative; transition:background .2s; cursor:pointer; flex-shrink:0;">
+                            <span style="display:block; width:20px; height:20px; border-radius:50%; background:#fff; position:absolute; top:2px; left:<?php echo $lt_on ? '22px' : '2px'; ?>; transition:left .2s; box-shadow:0 1px 3px rgba(0,0,0,.2);"></span>
+                        </span>
+                        <span style="font-weight:500;"><?php echo $lt_on ? 'Rastreamento ativado' : 'Rastreamento desativado'; ?></span>
+                    </label>
+                    <div class="hint" style="margin-top:8px;">Quando ativado, o script LionTrack é carregado automaticamente em todas as páginas do site. Os dados aparecem no painel lateral da conversa no LionChat. A conta precisa ter o módulo LionTrack liberado.</div>
+                </div>
+            </div>
+            <style>
+                .lion-toggle-on { background: #22c55e !important; }
+                .lion-toggle-on span { left: 22px !important; }
+                .lion-toggle:not(.lion-toggle-on) { background: #94a3b8 !important; }
+                .lion-toggle:not(.lion-toggle-on) span { left: 2px !important; }
+            </style>
+
             <!-- CAIXAS DE ENTRADA -->
             <div class="lion-card">
                 <h2 class="lion-card-title"><span class="dashicons dashicons-format-chat"></span> Caixas de Entrada</h2>
@@ -687,19 +711,6 @@ function lion_render_main_page() {
                     Atualizar Inboxes
                 </button>
                 <span id="lion-inbox-status" class="lion-inline-status"></span>
-            </div>
-
-            <!-- LIONTRACK -->
-            <div class="lion-card">
-                <h2 class="lion-card-title"><span class="dashicons dashicons-chart-area"></span> LionTrack — Rastreamento de Visitantes</h2>
-                <p class="lion-card-desc">Rastreie automaticamente o comportamento dos visitantes no site: páginas visitadas, tempo em cada página, origem da visita e presença online em tempo real.</p>
-                <div class="lion-field">
-                    <label style="display: flex; align-items: center; gap: 10px; cursor: pointer;">
-                        <input type="checkbox" name="lion_liontrack_enabled" value="1" <?php checked( get_option( 'lion_liontrack_enabled' ), '1' ); ?> style="width: 18px; height: 18px;" />
-                        <span>Ativar rastreamento de visitantes</span>
-                    </label>
-                    <div class="hint">Quando ativado, o script LionTrack será carregado automaticamente em todas as páginas do site. Os dados de navegação aparecem no painel lateral da conversa no LionChat. A conta precisa ter o módulo LionTrack liberado.</div>
-                </div>
             </div>
 
             <!-- REGRAS -->
