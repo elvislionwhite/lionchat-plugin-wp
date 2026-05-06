@@ -1,8 +1,8 @@
 <?php
 /**
  * Plugin Name: LionChat Lead Integrator
- * Description: Integração nativa WordPress/Elementor com o LionChat — tags, inboxes, respostas prontas, templates WhatsApp Cloud API, automações, fluxos do Flow Builder e validação de número no WhatsApp.
- * Version: 2.7
+ * Description: Integração nativa WordPress/Elementor com o LionChat — tags, inboxes, respostas prontas, templates WhatsApp Cloud API, automações, fluxos do Flow Builder e captura de UTMs/cliques de anúncio.
+ * Version: 2.8
  * Author: LionChat
  * Author URI: https://lionchat.com.br
  * Text Domain: lionchat-lead
@@ -11,7 +11,7 @@
 
 if ( ! defined( 'ABSPATH' ) ) exit;
 
-define( 'LION_VERSION', '2.7' );
+define( 'LION_VERSION', '2.8' );
 
 // ============================================================
 // AUTO-UPDATE — checa GitHub Releases e oferece atualizacao
@@ -126,9 +126,14 @@ function lion_get_ajax_creds() {
 // ============================================================
 function lion_get_utm_keys() {
     return array(
+        // UTMs padrao
         'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
-        'gclid', 'gbraid', 'wbraid', 'fbclid',
-        'ctwa_clid', 'ctwa_source_id', 'ctwa_source_url', 'ctwa_source_type'
+        // Click IDs de anuncios
+        'gclid', 'gbraid', 'wbraid', 'fbclid', 'msclkid', 'ttclid',
+        // Click-to-WhatsApp Ads (Meta)
+        'ctwa_clid', 'ctwa_source_id', 'ctwa_source_url', 'ctwa_source_type',
+        // Contexto da sessao (preenchido pelo JS, nao vem da URL)
+        'referrer', 'landing_page', 'device_type'
     );
 }
 
@@ -145,17 +150,40 @@ add_action( 'wp_head', function() {
             var v = params.get(k);
             if (v) found[k] = v;
         });
+
+        // Contexto da sessao (so define se ainda nao tem cookie OU se ainda nao tem chave)
+        // referrer: dominio que originou o clique (so primeira visita da jornada)
+        // landing_page: URL da primeira pagina aberta nesta sessao
+        // device_type: mobile / tablet / desktop (heuristica via UA + viewport)
+        try {
+            var ref = document.referrer || '';
+            if (ref) {
+                var refHost = (function(){ try { return new URL(ref).hostname; } catch(e) { return ''; } })();
+                var thisHost = location.hostname;
+                if (refHost && refHost !== thisHost) found.referrer = ref;
+            }
+            if (!sessionStorage.getItem('lion_landing')) {
+                sessionStorage.setItem('lion_landing', location.href);
+            }
+            found.landing_page = sessionStorage.getItem('lion_landing');
+
+            var ua = navigator.userAgent || '';
+            var w = (window.innerWidth || document.documentElement.clientWidth || 0);
+            var device = 'desktop';
+            if (/Mobi|Android|iPhone|iPod/i.test(ua) && w < 768) device = 'mobile';
+            else if (/iPad|Tablet|Android(?!.*Mobile)/i.test(ua) || (w >= 768 && w < 1024)) device = 'tablet';
+            found.device_type = device;
+        } catch(e) {}
+
         var existing = {};
         try {
             var match = document.cookie.match(/(?:^|;\s*)lion_utm=([^;]*)/);
             if (match) existing = JSON.parse(decodeURIComponent(match[1]));
         } catch(e) {}
-        if (Object.keys(found).length > 0) {
-            var merged = Object.assign(existing, found);
+        // Merge: novos sobrescrevem existing (se vieram nesta visita)
+        var merged = Object.assign(existing, found);
+        if (Object.keys(merged).length > 0) {
             document.cookie = 'lion_utm=' + encodeURIComponent(JSON.stringify(merged)) + ';expires=' + expires + ';path=/;SameSite=Lax' + secure;
-        } else if (Object.keys(existing).length > 0) {
-            // Renovar expiracao do cookie mesmo sem UTMs novos (30 dias desde ultima visita)
-            document.cookie = 'lion_utm=' + encodeURIComponent(JSON.stringify(existing)) + ';expires=' + expires + ';path=/;SameSite=Lax' + secure;
         }
     })();
 
@@ -498,6 +526,212 @@ add_filter( 'pre_update_option_lion_custom_rules', function( $new_rules, $old_ru
     }
     return $new_rules;
 }, 10, 2 );
+
+// ============================================================
+// CUSTOM WEBHOOK INTEGRATION — usa a infraestrutura existente do LionChat
+// (a mesma que Guru/Hotmart/Webhook universal usam).
+//
+// AIDEV-NOTE: Em vez de o plugin orquestrar 5+ chamadas (search/create contato,
+// criar conversa, mandar mensagem, aplicar tag), a partir do v2.8 o LionChat faz
+// tudo isso server-side: valida telefone via WAHA, cria/atualiza contato, dispara
+// flow OU automation conforme o form_name. Plugin so manda 1 POST por lead.
+// ============================================================
+
+/**
+ * Garante que existe uma CustomWebhookIntegration vinculada a esta instalacao WP.
+ * Idempotente — busca por nome antes de criar. Cacheado em wp_options.
+ *
+ * @return array|null ['id' => int, 'token' => string, 'webhook_url' => string]
+ */
+function lion_ensure_webhook_integration() {
+    $integration_id = (int) get_option( 'lion_webhook_integration_id', 0 );
+    $token          = get_option( 'lion_webhook_token', '' );
+    $url            = get_option( 'lion_webhook_url', '' );
+
+    if ( $integration_id && $token && $url ) {
+        return [ 'id' => $integration_id, 'token' => $token, 'webhook_url' => $url ];
+    }
+
+    // AIDEV-SECURITY: Lock transient previne race condition em saves concorrentes
+    // (ex: autosave + form post simultaneos criariam 2 integrations). try/finally
+    // garante limpeza do lock mesmo em fatal/exception — caso contrario lock ficaria
+    // travado pelos 30s de TTL sem necessidade.
+    if ( get_transient( 'lion_webhook_creating' ) ) {
+        return null;
+    }
+    set_transient( 'lion_webhook_creating', 1, 30 );
+
+    try {
+        $site_host     = wp_parse_url( home_url(), PHP_URL_HOST ) ?: 'wordpress';
+        $expected_name = 'WordPress — ' . $site_host;
+
+        // 1. Procura existente (caso plugin foi reinstalado ou opcao foi limpa)
+        // GET retorna ARRAY direto (nao envelopado em 'payload')
+        $list = lion_api( 'GET', '/custom_webhook_integrations' );
+        if ( ! is_wp_error( $list ) && is_array( $list ) ) {
+            foreach ( $list as $integ ) {
+                if ( ! is_array( $integ ) ) continue;
+                if ( ( $integ['name'] ?? '' ) === $expected_name ) {
+                    $found = lion_normalize_integration( $integ );
+                    if ( $found ) {
+                        update_option( 'lion_webhook_integration_id', $found['id'] );
+                        update_option( 'lion_webhook_token', $found['token'] );
+                        update_option( 'lion_webhook_url', $found['webhook_url'] );
+                        lion_log( "Webhook integration reaproveitada: ID {$found['id']}", 'INFO' );
+                        return $found;
+                    }
+                }
+            }
+        }
+
+        // 2. Cria nova — controller exige params dentro de `custom_webhook_integration`
+        $resp = lion_api( 'POST', '/custom_webhook_integrations', [
+            'custom_webhook_integration' => [
+                'name'                     => $expected_name,
+                'event_field'              => 'form_name',
+                'field_mapping'            => lion_default_field_mapping(),
+                'event_automation_mapping' => (object) [],
+            ],
+        ] );
+        if ( is_wp_error( $resp ) ) {
+            lion_log( "Erro ao criar webhook integration: " . $resp->get_error_message(), 'ERRO' );
+            return null;
+        }
+        // POST/show retorna o objeto direto (id, token, webhook_url, ...) sem 'payload'
+        $integ = lion_normalize_integration( $resp );
+        if ( ! $integ ) {
+            lion_log( "Resposta invalida ao criar webhook integration", 'ERRO' );
+            return null;
+        }
+
+        update_option( 'lion_webhook_integration_id', $integ['id'] );
+        update_option( 'lion_webhook_token', $integ['token'] );
+        update_option( 'lion_webhook_url', $integ['webhook_url'] );
+        lion_log( "Webhook integration criada: ID {$integ['id']}", 'SUCESSO' );
+        return $integ;
+    } finally {
+        delete_transient( 'lion_webhook_creating' );
+    }
+}
+
+/**
+ * Mapeamento padrao dos campos do payload do plugin → campos da conversa/contato no LionChat.
+ * AIDEV-NOTE: Nomes dos campos em conversation_attr_X aparecem em "Atributos da Conversa"
+ * no painel do operador, e ficam disponiveis em flows como {{additional_attributes.X}}.
+ */
+function lion_default_field_mapping() {
+    return [
+        // Identidade
+        'name'             => 'contact_name',
+        'email'            => 'contact_email',
+        'phone'            => 'contact_phone',
+        // Contexto do lead
+        'form_name'        => 'conversation_attr_form_name',
+        // UTMs
+        'utm_source'       => 'conversation_attr_utm_source',
+        'utm_medium'       => 'conversation_attr_utm_medium',
+        'utm_campaign'     => 'conversation_attr_utm_campaign',
+        'utm_term'         => 'conversation_attr_utm_term',
+        'utm_content'      => 'conversation_attr_utm_content',
+        // Click IDs de anuncios
+        'gclid'            => 'conversation_attr_gclid',
+        'gbraid'           => 'conversation_attr_gbraid',
+        'wbraid'           => 'conversation_attr_wbraid',
+        'fbclid'           => 'conversation_attr_fbclid',
+        'msclkid'          => 'conversation_attr_msclkid',
+        'ttclid'           => 'conversation_attr_ttclid',
+        // Click-to-WhatsApp Ads
+        'ctwa_clid'        => 'conversation_attr_ctwa_clid',
+        'ctwa_source_id'   => 'conversation_attr_ctwa_source_id',
+        'ctwa_source_url'  => 'conversation_attr_ctwa_source_url',
+        'ctwa_source_type' => 'conversation_attr_ctwa_source_type',
+        // Contexto da sessao
+        'referrer'         => 'conversation_attr_referrer',
+        'landing_page'     => 'conversation_attr_landing_page',
+        'device_type'      => 'conversation_attr_device_type',
+    ];
+}
+
+function lion_normalize_integration( $integ ) {
+    if ( ! is_array( $integ ) ) return null;
+    $id    = (int) ( $integ['id'] ?? 0 );
+    $token = $integ['token'] ?? '';
+    $url   = $integ['webhook_url'] ?? '';
+    if ( $id <= 0 || empty( $token ) || empty( $url ) ) return null;
+    return [ 'id' => $id, 'token' => $token, 'webhook_url' => $url ];
+}
+
+/**
+ * AIDEV-SECURITY: Valida que webhook_url aponta pro mesmo host de `lion_url`.
+ * Defesa contra SSRF se wp_options for adulterado por outro vetor (plugin malicioso,
+ * acesso DB, etc). Sem essa checagem, atacante poderia redirecionar leads pra
+ * 169.254.169.254, localhost:6379, ou qualquer servico interno.
+ */
+function lion_is_safe_webhook_url( $webhook_url ) {
+    if ( empty( $webhook_url ) ) return false;
+    $base_host = wp_parse_url( get_option( 'lion_url', '' ), PHP_URL_HOST );
+    $wh_host   = wp_parse_url( $webhook_url, PHP_URL_HOST );
+    $scheme    = wp_parse_url( $webhook_url, PHP_URL_SCHEME );
+    if ( ! in_array( $scheme, [ 'http', 'https' ], true ) ) return false;
+    if ( empty( $base_host ) || empty( $wh_host ) ) return false;
+    return strcasecmp( $base_host, $wh_host ) === 0;
+}
+
+/**
+ * Sincroniza event_automation_mapping da CustomWebhookIntegration com as regras do plugin.
+ *
+ * Regras com action_type=flow viram {form_name → {flow_id: X}}
+ * Regras com action_type=automation viram {form_name → {automation_id: Y}}
+ * Regras canned/template ficam fora do mapping (plugin orquestra essas localmente).
+ */
+function lion_sync_webhook_mapping( $rules ) {
+    if ( ! is_array( $rules ) ) return;
+
+    $mapping = [];
+    foreach ( $rules as $rule ) {
+        $form = trim( $rule['name'] ?? '' );
+        if ( empty( $form ) ) continue;
+        $type = $rule['action_type'] ?? '';
+        if ( $type === 'flow' && ! empty( $rule['flow_id'] ) ) {
+            $mapping[ $form ] = [ 'flow_id' => (int) $rule['flow_id'] ];
+        } elseif ( $type === 'automation' && ! empty( $rule['automation_id'] ) ) {
+            $mapping[ $form ] = [ 'automation_id' => (int) $rule['automation_id'] ];
+        }
+    }
+
+    // AIDEV-NOTE: Politica de criacao/atualizacao:
+    //   - Se integration JA EXISTE → SEMPRE PATCH (mesmo com mapping vazio,
+    //     pra limpar mapeamentos antigos quando cliente apaga regras flow/automation)
+    //   - Se integration NAO existe E mapping vazio → nao cria (poupa ruido)
+    //   - Se integration NAO existe E tem mapping → cria + PATCH
+    $existing_id = (int) get_option( 'lion_webhook_integration_id', 0 );
+    if ( ! $existing_id && empty( $mapping ) ) {
+        return;
+    }
+
+    $integ = lion_ensure_webhook_integration();
+    if ( ! $integ ) return;
+
+    $resp = lion_api_patch( '/custom_webhook_integrations/' . $integ['id'], [
+        'custom_webhook_integration' => [
+            'event_automation_mapping' => empty( $mapping ) ? (object) [] : $mapping,
+            'field_mapping'            => lion_default_field_mapping(),
+            'active'                   => true,
+        ],
+    ] );
+    if ( is_wp_error( $resp ) ) {
+        lion_log( "Falha ao atualizar mapping da webhook integration: " . $resp->get_error_message(), 'ERRO' );
+    } else {
+        $count = count( $mapping );
+        $msg   = $count > 0 ? "$count regra(s) flow/automation" : 'mapping limpo';
+        lion_log( "event_automation_mapping atualizado ($msg)", 'SYNC' );
+    }
+}
+
+// AIDEV-NOTE: WP dispara hooks diferentes para 1a criacao vs update da opcao.
+// Cobrimos os dois pra sincronizar mapping em qualquer cenario.
+add_action( 'add_option_lion_custom_rules',    function( $name, $value )            { lion_sync_webhook_mapping( $value ); }, 10, 2 );
+add_action( 'update_option_lion_custom_rules', function( $old_value, $new_value )    { lion_sync_webhook_mapping( $new_value ); }, 10, 2 );
 
 // ============================================================
 // PÁGINA PRINCIPAL
@@ -1185,17 +1419,26 @@ function lion_render_main_page() {
         // AIDEV-NOTE: Popula select de Flow. Mostra todos os flows ativos com trigger
         // webhook. Inbox vinculada e usada so pra exibir warning quando difere da inbox
         // que o cliente configurou (lion_outbox) — mas dispatcher usa a inbox do flow.
+        // AIDEV-NOTE: Filtro por tipo de inbox — espelha populateAutomations.
+        // Cloud API (Channel::Whatsapp) so mostra flows vinculados a inboxes Cloud API.
+        // WAHA (Channel::Waha) so mostra flows vinculados a inboxes WAHA.
+        // Flow sem inbox vinculada nao aparece (nao da pra disparar mensagem sem inbox).
         function populateFlows(sel) {
             if (!sel) return;
             var cur = sel.value;
+            var isCloud = isCloudApiOutbox();
             sel.innerHTML = '<option value="">-- Selecione um Flow --</option>';
             cachedFlows.forEach(function(f) {
-                var inboxLabel = '';
-                if (f.inbox_ids && f.inbox_ids.length) {
-                    var firstInbox = cachedInboxes.find(function(ib) { return Number(ib.id) === Number(f.inbox_ids[0]); });
-                    if (firstInbox) inboxLabel = ' — ' + firstInbox.name;
+                if (!f.inbox_ids || !f.inbox_ids.length) return;
+                var firstInboxId = Number(f.inbox_ids[0]);
+                var firstInbox = cachedInboxes.find(function(ib) { return Number(ib.id) === firstInboxId; });
+                if (firstInbox) {
+                    var ct = firstInbox.channel_type;
+                    if (isCloud && ct !== 'Channel::Whatsapp') return;
+                    if (!isCloud && ct === 'Channel::Whatsapp') return;
                 }
-                var opt = new Option(f.name + inboxLabel, f.id, false, String(f.id) === String(cur));
+                var label = f.name + (firstInbox ? ' — ' + firstInbox.name : '');
+                var opt = new Option(label, f.id, false, String(f.id) === String(cur));
                 opt.dataset.inboxIds = (f.inbox_ids || []).join(',');
                 sel.add(opt);
             });
@@ -1263,9 +1506,12 @@ function lion_render_main_page() {
             document.querySelectorAll('.lion-rule').forEach(function(rule) {
                 updateRuleToggle(rule, isCloud);
             });
-            // Re-populate automations (filtro por tipo de inbox)
+            // Re-populate automations e flows (filtro por tipo de inbox)
             document.querySelectorAll('.lion-automation-select').forEach(function(sel) {
                 populateAutomations(sel);
+            });
+            document.querySelectorAll('.lion-flow-select').forEach(function(sel) {
+                populateFlows(sel);
             });
         }
 
@@ -1884,11 +2130,6 @@ function lion_process_lead( $form_name, $raw ) {
                 $contact_id = $search['payload'][0]['id'];
             }
         }
-        // AIDEV-NOTE: phone_validation_status alimentado pela resposta da API quando o
-        // backend valida no WAHA. Valores possiveis: 'valid'|'not_found'|'waha_offline'.
-        // Usado mais abaixo para decidir se envia mensagem (lead morto = nao manda).
-        $phone_validation_status = null;
-
         if ( ! $contact_id ) {
             $contact_data = [ 'name' => $name, 'email' => $email, 'phone_number' => $phone_final ];
             if ( ! empty($extras) ) {
@@ -1904,29 +2145,9 @@ function lion_process_lead( $form_name, $raw ) {
                     $contact_data['custom_attributes'] = $custom_attrs;
                 }
             }
-            // AIDEV-NOTE: Validacao server-side do telefone no WhatsApp via WAHA check-exists.
-            // Backend usa a sessao da inbox que o cliente conectou (lion_outbox). Se numero
-            // existe no WhatsApp, backend ate corrige 9o digito e devolve numero certo.
-            $inbox_wa_for_validation = (int) get_option('lion_outbox');
-            if ( $inbox_wa_for_validation > 0 ) {
-                $contact_data['validate_whatsapp'] = true;
-                $contact_data['inbox_id']          = $inbox_wa_for_validation;
-            }
             $create = lion_api( 'POST', '/contacts', $contact_data );
             if ( ! is_wp_error($create) ) {
-                $contact_id              = $create['payload']['contact']['id'] ?? null;
-                $phone_validation_status = $create['payload']['phone_validation'] ?? null;
-                $corrected_phone         = $create['payload']['contact']['phone_number'] ?? '';
-                if ( $phone_validation_status === 'valid' && $corrected_phone && $corrected_phone !== $phone_final ) {
-                    lion_log( "Telefone corrigido pelo WhatsApp: $phone_final → $corrected_phone", 'INFO' );
-                    $phone_final = $corrected_phone;
-                }
-                if ( $phone_validation_status === 'not_found' ) {
-                    lion_log( "Telefone $phone_final NAO existe no WhatsApp — contato criado sem disparo de mensagem", 'AVISO' );
-                }
-                if ( $phone_validation_status === 'waha_offline' ) {
-                    lion_log( "WAHA offline — validacao do telefone nao realizada (mensagem sera enviada normalmente)", 'AVISO' );
-                }
+                $contact_id = $create['payload']['contact']['id'] ?? null;
             } else {
                 lion_log( "Erro ao criar contato: " . $create->get_error_message(), 'ERRO' );
                 return;
@@ -1955,15 +2176,15 @@ function lion_process_lead( $form_name, $raw ) {
         }
 
         // 4. WhatsApp conversation (UTMs passados direto — merge ou criacao com dados)
-        // AIDEV-NOTE: Pula criacao da conversa quando:
-        //   a) phone nao existe no WhatsApp (validacao server-side retornou not_found),
-        //   b) acao e 'flow' (FlowBuilder::WebhookDispatcher cria a propria conversa
-        //      na inbox vinculada ao flow — nao precisa pre-criar aqui).
+        // AIDEV-NOTE: Pula criacao da conversa quando acao e 'flow' — o backend
+        // (CustomWebhook::WebhookProcessorService → FlowBuilder::WebhookDispatcher)
+        // cria a propria conversa na inbox vinculada ao flow. Pre-criar aqui causaria
+        // conversas duplicadas. Para canned/template/automation, conversa em lion_outbox
+        // continua sendo criada normalmente.
         $inbox_wa    = get_option('lion_outbox');
         $action_type = $matched['action_type'] ?? 'canned';
         $conv_id     = null;
-        $skip_wa_conv = ( $phone_validation_status === 'not_found' ) || ( $action_type === 'flow' );
-        if ( ! empty($inbox_wa) && ! $skip_wa_conv ) {
+        if ( ! empty($inbox_wa) && $action_type !== 'flow' ) {
             $conv_id = lion_find_or_create_conversation( $contact_id, (int) $inbox_wa, $utm_data );
             if ( $conv_id && ! empty($utm_data) ) {
                 lion_log( "UTMs salvos na conversa WA #$conv_id: " . implode(', ', array_keys($utm_data)), 'INFO' );
@@ -2078,28 +2299,60 @@ function lion_process_lead( $form_name, $raw ) {
                 lion_log( "Conversa #$conv_id criada — automação webhook (ID: $auto_id) será disparada automaticamente.", 'SUCESSO' );
             }
         } elseif ( $action_type === 'flow' ) {
-            // AIDEV-NOTE: Acao Flow — chama o endpoint /flows/:id/dispatch que invoca
-            // FlowBuilder::WebhookDispatcher no backend. Dispatcher cria a conversa na inbox
-            // vinculada ao flow (nao no lion_outbox) e inicia a FlowSession. UTMs viajam em
-            // 'variables' e ficam disponiveis em conversation.additional_attributes pra usar
-            // como expressoes Liquid dentro do flow ({{additional_attributes.utm_source}} etc).
+            // AIDEV-NOTE: Acao Flow — manda o lead pro CustomWebhook do LionChat
+            // (mesma infra que Guru/Hotmart/Webhook universal usam). Backend faz tudo:
+            //   1. Valida telefone via WAHA check-exists (corrige 9o digito quando necessario)
+            //   2. Faz upsert do contato (encontra o que ja foi criado acima via phone)
+            //   3. Resolve o mapping {form_name → flow_id} configurado em event_automation_mapping
+            //   4. Dispara FlowBuilder::WebhookDispatcher com UTMs em conversation.additional_attributes
+            // Plugin nao precisa criar conversa local nem chamar endpoint inexistente.
             $flow_id = (int) ( $matched['flow_id'] ?? 0 );
             if ( $flow_id <= 0 ) {
                 lion_log( "Acao 'flow' selecionada mas flow_id vazio — nada disparado", 'AVISO' );
-            } elseif ( $phone_validation_status === 'not_found' ) {
-                lion_log( "Flow ID $flow_id NAO disparado — telefone $phone_final nao existe no WhatsApp", 'AVISO' );
             } else {
-                $dispatch_payload = [ 'contact_id' => (int) $contact_id ];
-                if ( ! empty($utm_data) ) {
-                    $dispatch_payload['variables'] = $utm_data;
+                $webhook_url = get_option( 'lion_webhook_url', '' );
+                if ( empty( $webhook_url ) ) {
+                    // Tenta criar a integration agora (pode acontecer se o cliente trocou pra 'flow' sem salvar regras antes)
+                    $integ = lion_ensure_webhook_integration();
+                    if ( $integ ) $webhook_url = $integ['webhook_url'];
                 }
-                $resp = lion_api( 'POST', "/flows/$flow_id/webhook_dispatch", $dispatch_payload );
-                if ( is_wp_error($resp) ) {
-                    lion_log( "Erro ao disparar Flow ID $flow_id: " . $resp->get_error_message(), 'ERRO' );
+                if ( empty( $webhook_url ) ) {
+                    lion_log( "Flow ID $flow_id NAO disparado — webhook integration nao configurado. Salve as regras pra criar.", 'ERRO' );
+                } elseif ( ! lion_is_safe_webhook_url( $webhook_url ) ) {
+                    // AIDEV-SECURITY: Defesa contra SSRF caso wp_options seja adulterado.
+                    // webhook_url tem que apontar pro mesmo host configurado em lion_url.
+                    lion_log( "Flow ID $flow_id NAO disparado — webhook_url invalido (host nao bate com lion_url)", 'ERRO' );
                 } else {
-                    $session_id  = $resp['flow_session_id'] ?? '?';
-                    $new_conv_id = $resp['conversation_id'] ?? '?';
-                    lion_log( "Flow ID $flow_id disparado — sessao #$session_id, conversa #$new_conv_id", 'SUCESSO' );
+                    // AIDEV-NOTE: Ordem do array_merge importa — chaves identitarias
+                    // (name/email/phone/form_name) sobrescrevem qualquer chave conflitante
+                    // que tenha vazado nos UTMs (defesa contra cookie adulterado).
+                    $payload = array_merge( (array) $utm_data, [
+                        'name'      => $name,
+                        'email'     => $email,
+                        'phone'     => $phone_final,
+                        'form_name' => $form_name,
+                    ] );
+                    $body = wp_json_encode( $payload );
+                    if ( $body === false ) {
+                        lion_log( "Erro ao serializar payload do webhook (UTF-8 invalido?). Flow ID $flow_id NAO disparado.", 'ERRO' );
+                        $body = null;
+                    }
+
+                    $resp = $body === null ? new WP_Error( 'lion_payload', 'payload_invalido' ) : wp_remote_post( $webhook_url, [
+                        'timeout' => 15,
+                        'headers' => [ 'Content-Type' => 'application/json' ],
+                        'body'    => $body,
+                    ] );
+                    if ( is_wp_error( $resp ) ) {
+                        lion_log( "Erro ao disparar webhook (Flow ID $flow_id): " . $resp->get_error_message(), 'ERRO' );
+                    } else {
+                        $code = wp_remote_retrieve_response_code( $resp );
+                        if ( $code === 200 ) {
+                            lion_log( "Flow ID $flow_id disparado via webhook (form: $form_name)", 'SUCESSO' );
+                        } else {
+                            lion_log( "Webhook retornou HTTP $code (Flow ID $flow_id, form: $form_name)", 'AVISO' );
+                        }
+                    }
                 }
             }
         }
