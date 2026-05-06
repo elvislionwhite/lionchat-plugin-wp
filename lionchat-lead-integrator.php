@@ -1,16 +1,32 @@
 <?php
 /**
  * Plugin Name: LionChat Lead Integrator
- * Description: Integração nativa WordPress/Elementor com o LionChat — tags, inboxes, respostas prontas, templates WhatsApp Cloud API, automações e mensagens automáticas.
- * Version: 2.6
+ * Description: Integração nativa WordPress/Elementor com o LionChat — tags, inboxes, respostas prontas, templates WhatsApp Cloud API, automações, fluxos do Flow Builder e validação de número no WhatsApp.
+ * Version: 2.7
  * Author: LionChat
  * Author URI: https://lionchat.com.br
  * Text Domain: lionchat-lead
+ * Update URI: https://github.com/elvislionwhite/lionchat-plugin-wp
  */
 
 if ( ! defined( 'ABSPATH' ) ) exit;
 
-define( 'LION_VERSION', '2.6' );
+define( 'LION_VERSION', '2.7' );
+
+// ============================================================
+// AUTO-UPDATE — checa GitHub Releases e oferece atualizacao
+// no painel /wp-admin/plugins.php igual qualquer plugin oficial.
+// Cliente nao precisa mais baixar zip manualmente.
+// ============================================================
+require __DIR__ . '/plugin-update-checker/plugin-update-checker.php';
+$lion_update_checker = YahnisElsts\PluginUpdateChecker\v5\PucFactory::buildUpdateChecker(
+    'https://github.com/elvislionwhite/lionchat-plugin-wp/',
+    __FILE__,
+    'lionchat-lead-integrator'
+);
+$lion_update_checker->setBranch( 'main' );
+// Usa os zips anexados nas Releases do GitHub (gerados pelo workflow release.yml)
+$lion_update_checker->getVcsApi()->enableReleaseAssets();
 
 // ============================================================
 // LOGO SVG (inline, usado no menu e header)
@@ -229,6 +245,7 @@ add_action( 'admin_init', function() {
 // ============================================================
 add_action( 'wp_ajax_lion_test_connection', function() {
     check_ajax_referer( 'lion_admin_nonce', 'nonce' );
+    if ( ! current_user_can( 'manage_options' ) ) wp_send_json_error( 'forbidden', 403 );
     $url   = sanitize_text_field( $_POST['url'] ?? '' );
     $acc   = sanitize_text_field( $_POST['acc'] ?? '' );
     $token = sanitize_text_field( $_POST['token'] ?? '' );
@@ -251,6 +268,7 @@ add_action( 'wp_ajax_lion_test_connection', function() {
 // ============================================================
 add_action( 'wp_ajax_lion_fetch_inboxes', function() {
     check_ajax_referer( 'lion_admin_nonce', 'nonce' );
+    if ( ! current_user_can( 'manage_options' ) ) wp_send_json_error( 'forbidden', 403 );
     $creds = lion_get_ajax_creds();
     $data = lion_api( 'GET', '/inboxes', null, $creds );
     if ( is_wp_error( $data ) ) wp_send_json_error( $data->get_error_message() );
@@ -324,6 +342,7 @@ add_action( 'wp_ajax_lion_fetch_inboxes', function() {
 // ============================================================
 add_action( 'wp_ajax_lion_fetch_labels', function() {
     check_ajax_referer( 'lion_admin_nonce', 'nonce' );
+    if ( ! current_user_can( 'manage_options' ) ) wp_send_json_error( 'forbidden', 403 );
     $data = lion_api( 'GET', '/labels', null, lion_get_ajax_creds() );
     if ( is_wp_error( $data ) ) wp_send_json_error( $data->get_error_message() );
     $items = [];
@@ -338,6 +357,7 @@ add_action( 'wp_ajax_lion_fetch_labels', function() {
 // ============================================================
 add_action( 'wp_ajax_lion_fetch_canned', function() {
     check_ajax_referer( 'lion_admin_nonce', 'nonce' );
+    if ( ! current_user_can( 'manage_options' ) ) wp_send_json_error( 'forbidden', 403 );
     $data = lion_api( 'GET', '/canned_responses', null, lion_get_ajax_creds() );
     if ( is_wp_error( $data ) ) wp_send_json_error( $data->get_error_message() );
     $items = [];
@@ -371,6 +391,7 @@ add_action( 'wp_ajax_lion_fetch_canned', function() {
 // ============================================================
 add_action( 'wp_ajax_lion_fetch_automations', function() {
     check_ajax_referer( 'lion_admin_nonce', 'nonce' );
+    if ( ! current_user_can( 'manage_options' ) ) wp_send_json_error( 'forbidden', 403 );
     $data = lion_api( 'GET', '/automation_rules', null, lion_get_ajax_creds() );
     if ( is_wp_error( $data ) ) wp_send_json_error( $data->get_error_message() );
     $items = [];
@@ -389,10 +410,38 @@ add_action( 'wp_ajax_lion_fetch_automations', function() {
 });
 
 // ============================================================
+// AJAX: Buscar Flows do Flow Builder com trigger webhook
+// AIDEV-NOTE: Usa o mesmo filtro que as outras integracoes (Guru/Hotmart/Webhook):
+// ?with_webhook_trigger=true retorna apenas flows ativos que aceitam disparo externo.
+// ============================================================
+add_action( 'wp_ajax_lion_fetch_flows', function() {
+    check_ajax_referer( 'lion_admin_nonce', 'nonce' );
+    if ( ! current_user_can( 'manage_options' ) ) wp_send_json_error( 'forbidden', 403 );
+    $data = lion_api( 'GET', '/flows?with_webhook_trigger=true', null, lion_get_ajax_creds() );
+    if ( is_wp_error( $data ) ) wp_send_json_error( $data->get_error_message() );
+    $items = [];
+    foreach ( ( $data['payload'] ?? $data ?? [] ) as $flow ) {
+        if ( ! is_array( $flow ) ) continue;
+        if ( ! ( $flow['active'] ?? true ) ) continue;
+        $inbox_ids = [];
+        foreach ( ( $flow['inboxes'] ?? [] ) as $ib ) {
+            if ( is_array( $ib ) && isset( $ib['id'] ) ) $inbox_ids[] = (int) $ib['id'];
+        }
+        $items[] = [
+            'id'        => (int) ( $flow['id'] ?? 0 ),
+            'name'      => $flow['name'] ?? '',
+            'inbox_ids' => $inbox_ids,
+        ];
+    }
+    wp_send_json_success( $items );
+});
+
+// ============================================================
 // AJAX: Buscar formulários (Elementor + CF7 + WPForms + detectados)
 // ============================================================
 add_action( 'wp_ajax_lion_fetch_forms', function() {
     check_ajax_referer( 'lion_admin_nonce', 'nonce' );
+    if ( ! current_user_can( 'manage_options' ) ) wp_send_json_error( 'forbidden', 403 );
     $forms = [];
     $detected = get_option( 'lion_detected_forms', [] );
     if ( is_array( $detected ) ) {
@@ -804,6 +853,21 @@ function lion_render_main_page() {
                                     <div class="lion-inbox-warn"><span class="dashicons dashicons-warning"></span> <span class="warn-text"></span></div>
                                 </div>
                             </div>
+
+                            <?php /* AIDEV-NOTE: Renderizar painel flow server-side preserva flow_id salvo
+                                * mesmo quando JS ainda nao carregou a lista de flows. Mesmo padrao do
+                                * panel-canned/automation. updateRuleToggle reaproveita este elemento. */ ?>
+                            <div class="lion-action-panel lion-panel-flow" <?php echo $action_type !== 'flow' ? 'style="display:none"' : ''; ?>>
+                                <div class="lion-field">
+                                    <label>Flow (Flow Builder)</label>
+                                    <select name="lion_custom_rules[<?php echo $idx; ?>][flow_id]" class="lion-flow-select">
+                                        <?php $fid = $rule['flow_id'] ?? ''; ?>
+                                        <option value="<?php echo esc_attr( $fid ); ?>"><?php echo $fid ? "ID: $fid (salvo)" : '-- Selecione um Flow --'; ?></option>
+                                    </select>
+                                    <div class="lion-tpl-info"><span class="dashicons dashicons-info-outline"></span> Apenas flows ativos com trigger de webhook sao listados.</div>
+                                    <div class="lion-inbox-warn" style="display:none"><span class="dashicons dashicons-warning"></span> <span class="warn-text"></span></div>
+                                </div>
+                            </div>
                         </div>
                     <?php endforeach; else : ?>
                         <div class="lion-empty" id="lion-empty-state">
@@ -836,7 +900,7 @@ function lion_render_main_page() {
         const SAVED_OUTBOX = '<?php echo esc_js( $saved_outbox ); ?>';
         const HAS_CREDS    = <?php echo $has_creds ? 'true' : 'false'; ?>;
 
-        let cachedForms = [], cachedTags = [], cachedCanned = [], cachedAutomations = [], cachedInboxes = [];
+        let cachedForms = [], cachedTags = [], cachedCanned = [], cachedAutomations = [], cachedFlows = [], cachedInboxes = [];
 
         // ---- DOM refs ----
         const container    = document.getElementById('lion-rules-container');
@@ -999,12 +1063,14 @@ function lion_render_main_page() {
                 post('lion_fetch_canned'),
                 post('lion_fetch_forms'),
                 post('lion_fetch_automations'),
+                post('lion_fetch_flows'),
             ]).then(function(results) {
-                var lr = results[0], cr = results[1], fr = results[2], ar = results[3];
+                var lr = results[0], cr = results[1], fr = results[2], ar = results[3], flr = results[4];
                 if (lr.success) cachedTags = lr.data;
                 if (cr.success) cachedCanned = cr.data;
                 if (fr.success) cachedForms = fr.data;
                 if (ar.success) cachedAutomations = ar.data;
+                if (flr.success) cachedFlows = flr.data;
 
                 // Populate all selects in existing rules
                 populateAllTagChips();
@@ -1013,6 +1079,7 @@ function lion_render_main_page() {
                 document.querySelectorAll('.lion-automation-select').forEach(function(sel) {
                     populateAutomations(sel);
                 });
+                document.querySelectorAll('.lion-flow-select').forEach(populateFlows);
             });
         }
 
@@ -1115,6 +1182,49 @@ function lion_render_main_page() {
             checkInboxMismatch(sel);
         }
 
+        // AIDEV-NOTE: Popula select de Flow. Mostra todos os flows ativos com trigger
+        // webhook. Inbox vinculada e usada so pra exibir warning quando difere da inbox
+        // que o cliente configurou (lion_outbox) — mas dispatcher usa a inbox do flow.
+        function populateFlows(sel) {
+            if (!sel) return;
+            var cur = sel.value;
+            sel.innerHTML = '<option value="">-- Selecione um Flow --</option>';
+            cachedFlows.forEach(function(f) {
+                var inboxLabel = '';
+                if (f.inbox_ids && f.inbox_ids.length) {
+                    var firstInbox = cachedInboxes.find(function(ib) { return Number(ib.id) === Number(f.inbox_ids[0]); });
+                    if (firstInbox) inboxLabel = ' — ' + firstInbox.name;
+                }
+                var opt = new Option(f.name + inboxLabel, f.id, false, String(f.id) === String(cur));
+                opt.dataset.inboxIds = (f.inbox_ids || []).join(',');
+                sel.add(opt);
+            });
+            checkFlowInboxWarning(sel);
+        }
+
+        // AIDEV-NOTE: Avisa quando inbox vinculada ao flow != inbox configurada (lion_outbox).
+        // Nao bloqueia — flow pode ter inbox propria diferente da que envia mensagem padrao.
+        function checkFlowInboxWarning(sel) {
+            if (!sel) return;
+            var rule = sel.closest('.lion-rule');
+            var warn = rule ? rule.querySelector('.lion-panel-flow .lion-inbox-warn') : null;
+            if (!warn) return;
+            warn.style.display = 'none';
+
+            var opt = sel.options[sel.selectedIndex];
+            if (!opt || !opt.value) return;
+            var ids = (opt.dataset.inboxIds || '').split(',').map(function(s) { return s.trim(); }).filter(Boolean);
+            if (!ids.length) return;
+            var configuredOutbox = String(SAVED_OUTBOX || '');
+            if (configuredOutbox && ids.indexOf(configuredOutbox) === -1) {
+                var firstName = '';
+                var ib = cachedInboxes.find(function(x) { return String(x.id) === ids[0]; });
+                if (ib) firstName = ib.name;
+                warn.querySelector('.warn-text').textContent = 'Este flow envia pela inbox "' + (firstName || 'ID ' + ids[0]) + '" (diferente da inbox de saida configurada acima).';
+                warn.style.display = '';
+            }
+        }
+
         function updateCannedPreview(sel) {
             var preview = sel.closest('.lion-field');
             preview = preview ? preview.querySelector('.lion-canned-preview') : null;
@@ -1172,17 +1282,40 @@ function lion_render_main_page() {
             var panelCanned = rule.querySelector('.lion-panel-canned');
             var panelAuto = rule.querySelector('.lion-panel-automation');
             var panelTemplate = rule.querySelector('.lion-panel-template');
+            var panelFlow = rule.querySelector('.lion-panel-flow');
+
+            // AIDEV-NOTE: panelFlow ja vem renderizado pelo PHP (foreach das regras salvas)
+            // ou pelo addRule (lion-add-rule handler). Aqui so criamos quando nao existe
+            // ainda — caso de regra criada por update dinamico de outro fluxo. Preserva o
+            // flow_id salvo (mantido pelo PHP via <option value="$fid">).
+            if (!panelFlow) {
+                panelFlow = document.createElement('div');
+                panelFlow.className = 'lion-action-panel lion-panel-flow';
+                panelFlow.innerHTML = ''
+                    + '<div class="lion-field">'
+                    + '<label>Flow (Flow Builder)</label>'
+                    + '<select name="lion_custom_rules[' + idx + '][flow_id]" class="lion-flow-select"><option value="">-- Selecione um Flow --</option></select>'
+                    + '<div class="lion-tpl-info"><span class="dashicons dashicons-info-outline"></span> Apenas flows ativos com trigger de webhook sao listados.</div>'
+                    + '<div class="lion-inbox-warn" style="display:none"><span class="dashicons dashicons-warning"></span> <span class="warn-text"></span></div>'
+                    + '</div>';
+                rule.appendChild(panelFlow);
+            }
+            // Sempre re-popula com o cache (mantem option salvo via cur=sel.value)
+            if (cachedFlows.length) populateFlows(panelFlow.querySelector('.lion-flow-select'));
 
             if (isCloud) {
-                // ---- CLOUD API: Template WhatsApp | Automação ----
-                var tplChecked = (actionType.value !== 'automation');
+                // ---- CLOUD API: Template WhatsApp | Automação | Flow ----
+                var flowChecked = (actionType.value === 'flow');
                 var autoChecked = (actionType.value === 'automation');
+                var tplChecked = !flowChecked && !autoChecked;
 
                 toggleDiv.innerHTML = ''
                     + '<input type="radio" id="act_template_' + idx + '" name="_act_' + idx + '" value="template" class="lion-action-radio"' + (tplChecked ? ' checked' : '') + '>'
                     + '<label for="act_template_' + idx + '"><span class="dashicons dashicons-editor-paste-word" style="font-size:16px;width:16px;height:16px;"></span> Template WhatsApp <span class="lion-cloud-badge">API</span></label>'
                     + '<input type="radio" id="act_auto_' + idx + '" name="_act_' + idx + '" value="automation" class="lion-action-radio"' + (autoChecked ? ' checked' : '') + '>'
-                    + '<label for="act_auto_' + idx + '"><span class="dashicons dashicons-randomize" style="font-size:16px;width:16px;height:16px;"></span> Automação Webhook</label>';
+                    + '<label for="act_auto_' + idx + '"><span class="dashicons dashicons-randomize" style="font-size:16px;width:16px;height:16px;"></span> Automação Webhook</label>'
+                    + '<input type="radio" id="act_flow_' + idx + '" name="_act_' + idx + '" value="flow" class="lion-action-radio"' + (flowChecked ? ' checked' : '') + '>'
+                    + '<label for="act_flow_' + idx + '"><span class="dashicons dashicons-networking" style="font-size:16px;width:16px;height:16px;"></span> Flow</label>';
 
                 // Hide canned panel
                 if (panelCanned) panelCanned.style.display = 'none';
@@ -1223,17 +1356,21 @@ function lion_render_main_page() {
                 if (tplChecked) actionType.value = 'template';
                 panelTemplate.style.display = tplChecked ? '' : 'none';
                 if (panelAuto) panelAuto.style.display = autoChecked ? '' : 'none';
+                panelFlow.style.display = flowChecked ? '' : 'none';
 
             } else {
-                // ---- WAHA / OUTRO: Resposta Pronta | Automação ----
-                var cannedChecked = (actionType.value !== 'automation');
+                // ---- WAHA / OUTRO: Resposta Pronta | Automação | Flow ----
+                var flowChecked2 = (actionType.value === 'flow');
                 var autoChecked2 = (actionType.value === 'automation');
+                var cannedChecked = !flowChecked2 && !autoChecked2;
 
                 toggleDiv.innerHTML = ''
                     + '<input type="radio" id="act_canned_' + idx + '" name="_act_' + idx + '" value="canned" class="lion-action-radio"' + (cannedChecked ? ' checked' : '') + '>'
                     + '<label for="act_canned_' + idx + '"><span class="dashicons dashicons-format-quote" style="font-size:16px;width:16px;height:16px;"></span> Resposta Pronta <span class="lion-waha-badge">QR</span></label>'
                     + '<input type="radio" id="act_auto_' + idx + '" name="_act_' + idx + '" value="automation" class="lion-action-radio"' + (autoChecked2 ? ' checked' : '') + '>'
-                    + '<label for="act_auto_' + idx + '"><span class="dashicons dashicons-randomize" style="font-size:16px;width:16px;height:16px;"></span> Automação Webhook</label>';
+                    + '<label for="act_auto_' + idx + '"><span class="dashicons dashicons-randomize" style="font-size:16px;width:16px;height:16px;"></span> Automação Webhook</label>'
+                    + '<input type="radio" id="act_flow_' + idx + '" name="_act_' + idx + '" value="flow" class="lion-action-radio"' + (flowChecked2 ? ' checked' : '') + '>'
+                    + '<label for="act_flow_' + idx + '"><span class="dashicons dashicons-networking" style="font-size:16px;width:16px;height:16px;"></span> Flow</label>';
 
                 // Hide template panel
                 if (panelTemplate) panelTemplate.style.display = 'none';
@@ -1242,6 +1379,7 @@ function lion_render_main_page() {
                 if (cannedChecked) actionType.value = 'canned';
                 if (panelCanned) panelCanned.style.display = cannedChecked ? '' : 'none';
                 if (panelAuto) panelAuto.style.display = autoChecked2 ? '' : 'none';
+                panelFlow.style.display = flowChecked2 ? '' : 'none';
             }
         }
 
@@ -1358,9 +1496,16 @@ function lion_render_main_page() {
                 var pc = rule.querySelector('.lion-panel-canned');
                 var pa = rule.querySelector('.lion-panel-automation');
                 var pt = rule.querySelector('.lion-panel-template');
+                var pf = rule.querySelector('.lion-panel-flow');
                 if (pc) pc.style.display = (val === 'canned') ? '' : 'none';
                 if (pa) pa.style.display = (val === 'automation') ? '' : 'none';
                 if (pt) pt.style.display = (val === 'template') ? '' : 'none';
+                if (pf) pf.style.display = (val === 'flow') ? '' : 'none';
+            }
+
+            // Flow select change — atualiza warning de inbox vinculada
+            if (target.classList.contains('lion-flow-select')) {
+                checkFlowInboxWarning(target);
             }
 
             // Template select change
@@ -1437,6 +1582,11 @@ function lion_render_main_page() {
                 + '</div>'
                 + '<div class="lion-action-panel lion-panel-automation" style="display:none">'
                 + '<div class="lion-field"><label>Automação</label><select name="lion_custom_rules[' + idx + '][automation_id]" class="lion-automation-select"><option value="">-- Selecione --</option></select><div class="lion-inbox-warn"><span class="dashicons dashicons-warning"></span> <span class="warn-text"></span></div></div>'
+                + '</div>'
+                + '<div class="lion-action-panel lion-panel-flow" style="display:none">'
+                + '<div class="lion-field"><label>Flow (Flow Builder)</label><select name="lion_custom_rules[' + idx + '][flow_id]" class="lion-flow-select"><option value="">-- Selecione um Flow --</option></select>'
+                + '<div class="lion-tpl-info"><span class="dashicons dashicons-info-outline"></span> Apenas flows ativos com trigger de webhook sao listados.</div>'
+                + '<div class="lion-inbox-warn" style="display:none"><span class="dashicons dashicons-warning"></span> <span class="warn-text"></span></div></div>'
                 + '</div>';
             container.appendChild(div);
 
@@ -1444,6 +1594,7 @@ function lion_render_main_page() {
             if (cachedForms.length) populateForms(div.querySelector('.lion-form-select'));
             if (cachedCanned.length) populateCanned(div.querySelector('.lion-canned-select'));
             if (cachedAutomations.length) populateAutomations(div.querySelector('.lion-automation-select'));
+            if (cachedFlows.length) populateFlows(div.querySelector('.lion-flow-select'));
             // Tag UI
             var tagWrapper = div.querySelector('.lion-tag-wrapper');
             if (tagWrapper) renderTagUI(tagWrapper);
@@ -1733,6 +1884,11 @@ function lion_process_lead( $form_name, $raw ) {
                 $contact_id = $search['payload'][0]['id'];
             }
         }
+        // AIDEV-NOTE: phone_validation_status alimentado pela resposta da API quando o
+        // backend valida no WAHA. Valores possiveis: 'valid'|'not_found'|'waha_offline'.
+        // Usado mais abaixo para decidir se envia mensagem (lead morto = nao manda).
+        $phone_validation_status = null;
+
         if ( ! $contact_id ) {
             $contact_data = [ 'name' => $name, 'email' => $email, 'phone_number' => $phone_final ];
             if ( ! empty($extras) ) {
@@ -1748,9 +1904,33 @@ function lion_process_lead( $form_name, $raw ) {
                     $contact_data['custom_attributes'] = $custom_attrs;
                 }
             }
+            // AIDEV-NOTE: Validacao server-side do telefone no WhatsApp via WAHA check-exists.
+            // Backend usa a sessao da inbox que o cliente conectou (lion_outbox). Se numero
+            // existe no WhatsApp, backend ate corrige 9o digito e devolve numero certo.
+            $inbox_wa_for_validation = (int) get_option('lion_outbox');
+            if ( $inbox_wa_for_validation > 0 ) {
+                $contact_data['validate_whatsapp'] = true;
+                $contact_data['inbox_id']          = $inbox_wa_for_validation;
+            }
             $create = lion_api( 'POST', '/contacts', $contact_data );
-            if ( ! is_wp_error($create) ) $contact_id = $create['payload']['contact']['id'] ?? null;
-            else { lion_log( "Erro ao criar contato: " . $create->get_error_message(), 'ERRO' ); return; }
+            if ( ! is_wp_error($create) ) {
+                $contact_id              = $create['payload']['contact']['id'] ?? null;
+                $phone_validation_status = $create['payload']['phone_validation'] ?? null;
+                $corrected_phone         = $create['payload']['contact']['phone_number'] ?? '';
+                if ( $phone_validation_status === 'valid' && $corrected_phone && $corrected_phone !== $phone_final ) {
+                    lion_log( "Telefone corrigido pelo WhatsApp: $phone_final → $corrected_phone", 'INFO' );
+                    $phone_final = $corrected_phone;
+                }
+                if ( $phone_validation_status === 'not_found' ) {
+                    lion_log( "Telefone $phone_final NAO existe no WhatsApp — contato criado sem disparo de mensagem", 'AVISO' );
+                }
+                if ( $phone_validation_status === 'waha_offline' ) {
+                    lion_log( "WAHA offline — validacao do telefone nao realizada (mensagem sera enviada normalmente)", 'AVISO' );
+                }
+            } else {
+                lion_log( "Erro ao criar contato: " . $create->get_error_message(), 'ERRO' );
+                return;
+            }
         }
         if ( ! $contact_id ) { lion_log( "Contato não encontrado/criado para $phone_final", 'ERRO' ); return; }
 
@@ -1775,9 +1955,15 @@ function lion_process_lead( $form_name, $raw ) {
         }
 
         // 4. WhatsApp conversation (UTMs passados direto — merge ou criacao com dados)
-        $inbox_wa = get_option('lion_outbox');
-        $conv_id  = null;
-        if ( ! empty($inbox_wa) ) {
+        // AIDEV-NOTE: Pula criacao da conversa quando:
+        //   a) phone nao existe no WhatsApp (validacao server-side retornou not_found),
+        //   b) acao e 'flow' (FlowBuilder::WebhookDispatcher cria a propria conversa
+        //      na inbox vinculada ao flow — nao precisa pre-criar aqui).
+        $inbox_wa    = get_option('lion_outbox');
+        $action_type = $matched['action_type'] ?? 'canned';
+        $conv_id     = null;
+        $skip_wa_conv = ( $phone_validation_status === 'not_found' ) || ( $action_type === 'flow' );
+        if ( ! empty($inbox_wa) && ! $skip_wa_conv ) {
             $conv_id = lion_find_or_create_conversation( $contact_id, (int) $inbox_wa, $utm_data );
             if ( $conv_id && ! empty($utm_data) ) {
                 lion_log( "UTMs salvos na conversa WA #$conv_id: " . implode(', ', array_keys($utm_data)), 'INFO' );
@@ -1785,7 +1971,6 @@ function lion_process_lead( $form_name, $raw ) {
         }
 
         // 5. Execute action
-        $action_type = $matched['action_type'] ?? 'canned';
 
         if ( $action_type === 'template' ) {
             $inbox_data = lion_api( 'GET', '/inboxes' );
@@ -1891,6 +2076,31 @@ function lion_process_lead( $form_name, $raw ) {
             $auto_id = $matched['automation_id'] ?? '';
             if ( ! empty($auto_id) ) {
                 lion_log( "Conversa #$conv_id criada — automação webhook (ID: $auto_id) será disparada automaticamente.", 'SUCESSO' );
+            }
+        } elseif ( $action_type === 'flow' ) {
+            // AIDEV-NOTE: Acao Flow — chama o endpoint /flows/:id/dispatch que invoca
+            // FlowBuilder::WebhookDispatcher no backend. Dispatcher cria a conversa na inbox
+            // vinculada ao flow (nao no lion_outbox) e inicia a FlowSession. UTMs viajam em
+            // 'variables' e ficam disponiveis em conversation.additional_attributes pra usar
+            // como expressoes Liquid dentro do flow ({{additional_attributes.utm_source}} etc).
+            $flow_id = (int) ( $matched['flow_id'] ?? 0 );
+            if ( $flow_id <= 0 ) {
+                lion_log( "Acao 'flow' selecionada mas flow_id vazio — nada disparado", 'AVISO' );
+            } elseif ( $phone_validation_status === 'not_found' ) {
+                lion_log( "Flow ID $flow_id NAO disparado — telefone $phone_final nao existe no WhatsApp", 'AVISO' );
+            } else {
+                $dispatch_payload = [ 'contact_id' => (int) $contact_id ];
+                if ( ! empty($utm_data) ) {
+                    $dispatch_payload['variables'] = $utm_data;
+                }
+                $resp = lion_api( 'POST', "/flows/$flow_id/webhook_dispatch", $dispatch_payload );
+                if ( is_wp_error($resp) ) {
+                    lion_log( "Erro ao disparar Flow ID $flow_id: " . $resp->get_error_message(), 'ERRO' );
+                } else {
+                    $session_id  = $resp['flow_session_id'] ?? '?';
+                    $new_conv_id = $resp['conversation_id'] ?? '?';
+                    lion_log( "Flow ID $flow_id disparado — sessao #$session_id, conversa #$new_conv_id", 'SUCESSO' );
+                }
             }
         }
 
