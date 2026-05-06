@@ -1,0 +1,56 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get version from tag
+        id: version
+        run: echo "value=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify plugin version matches tag
+        run: |
+          HEADER_VERSION=$(grep -oE "Version:[[:space:]]*[0-9]+(\.[0-9]+)*" lionchat-lead-integrator.php | head -1 | awk '{print $2}')
+          CONST_VERSION=$(grep -oE "define\([[:space:]]*'LION_VERSION'[[:space:]]*,[[:space:]]*'[0-9]+(\.[0-9]+)*'" lionchat-lead-integrator.php | head -1 | grep -oE "'[0-9]+(\.[0-9]+)*'" | tail -1 | tr -d "'")
+          TAG_VERSION="${{ steps.version.outputs.value }}"
+          echo "Header version : $HEADER_VERSION"
+          echo "LION_VERSION   : $CONST_VERSION"
+          echo "Git tag        : $TAG_VERSION"
+          if [ "$HEADER_VERSION" != "$TAG_VERSION" ] || [ "$CONST_VERSION" != "$TAG_VERSION" ]; then
+            echo "ERROR: Versoes desalinhadas. Atualize o header 'Version:' e a constante LION_VERSION antes de criar a tag."
+            exit 1
+          fi
+
+      - name: Build plugin zip
+        run: |
+          STAGING_DIR="$RUNNER_TEMP/lionchat-lead-integrator"
+          mkdir -p "$STAGING_DIR"
+          rsync -av \
+            --exclude='.git' \
+            --exclude='.github' \
+            --exclude='*.zip' \
+            --exclude='plugin-src' \
+            --exclude='node_modules' \
+            --exclude='.DS_Store' \
+            --exclude='README.md' \
+            ./ "$STAGING_DIR/"
+          cd "$RUNNER_TEMP"
+          zip -r "$GITHUB_WORKSPACE/lionchat-lead-integrator.zip" lionchat-lead-integrator
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: v${{ steps.version.outputs.value }}
+          generate_release_notes: true
+          files: lionchat-lead-integrator.zip
