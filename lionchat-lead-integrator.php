@@ -2,7 +2,7 @@
 /**
  * Plugin Name: LionChat Lead Integrator
  * Description: Integração nativa WordPress/Elementor com o LionChat — tags, inboxes, respostas prontas, templates WhatsApp Cloud API, automações, fluxos do Flow Builder e captura de UTMs/cliques de anúncio.
- * Version: 2.8
+ * Version: 2.9
  * Author: LionChat
  * Author URI: https://lionchat.com.br
  * Text Domain: lionchat-lead
@@ -11,7 +11,7 @@
 
 if ( ! defined( 'ABSPATH' ) ) exit;
 
-define( 'LION_VERSION', '2.8' );
+define( 'LION_VERSION', '2.9' );
 
 // ============================================================
 // AUTO-UPDATE — checa GitHub Releases e oferece atualizacao
@@ -227,7 +227,7 @@ add_action( 'wp_head', function() {
         }
         if ( ! empty( $lt_token ) ) {
             ?>
-            <script src="<?php echo esc_url( $url . '/liontrack.js' ); ?>" onload="LionTrack.init({ token: '<?php echo esc_attr( $lt_token ); ?>' })"></script>
+            <script src="<?php echo esc_url( $url . '/liontrack.js?v=' . LION_VERSION ); ?>" onload="LionTrack.init({ token: '<?php echo esc_attr( $lt_token ); ?>' })"></script>
             <?php
         }
     }

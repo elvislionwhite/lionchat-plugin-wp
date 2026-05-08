@@ -120,9 +120,19 @@ Para atualizar o plugin:
 
 ## Versao
 
-Atual: **2.5**
+Atual: **2.9**
 
 ## Changelog
+
+### v2.9
+- Cache buster `?v=LION_VERSION` no script do LionTrack — propagacao imediata de novas versoes do pixel quando o plugin e atualizado, sem precisar esperar cache do navegador expirar
+- Sem mudancas funcionais — toda nova feature do LionTrack (stitch via botao WhatsApp, geolocalizacao, captura de fbp/fbc/fbclid pra Meta CAPI EMQ alto) ja era automatica server-side, mas agora atualiza com 0 latencia em sites que ja tinham o pixel cacheado
+
+### v2.6 - v2.8
+- Auto-update via GitHub Releases (Plugin Update Checker integrado)
+- Validacao WhatsApp + acoes Flow Builder + hardening de seguranca
+- Toggle LionTrack so aparece se a conta tem a feature ativa
+- Custom Webhook do LionChat (zero mudanca backend)
 
 ### v2.5
 - Tracking de campanhas (UTMs, gclid, fbclid, ctwa_*)
