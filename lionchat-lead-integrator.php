@@ -2,7 +2,7 @@
 /**
  * Plugin Name: LionChat Lead Integrator
  * Description: Integração nativa WordPress/Elementor com o LionChat — tags, inboxes, respostas prontas, templates WhatsApp Cloud API, automações, fluxos do Flow Builder e captura de UTMs/cliques de anúncio.
- * Version: 3.0
+ * Version: 3.1
  * Author: LionChat
  * Author URI: https://lionchat.com.br
  * Text Domain: lionchat-lead
@@ -11,7 +11,7 @@
 
 if ( ! defined( 'ABSPATH' ) ) exit;
 
-define( 'LION_VERSION', '3.0' );
+define( 'LION_VERSION', '3.1' );
 
 // ============================================================
 // AUTO-UPDATE — checa GitHub Releases e oferece atualizacao
@@ -271,6 +271,19 @@ add_action( 'admin_init', function() {
 // ============================================================
 // AJAX: Testar conexão
 // ============================================================
+// ============================================================
+// AJAX: Salvar toggle do LionTrack (auto-save sem precisar do botao "Salvar Configuracoes")
+// ============================================================
+add_action( 'wp_ajax_lion_save_liontrack_toggle', function() {
+    check_ajax_referer( 'lion_admin_nonce', 'nonce' );
+    if ( ! current_user_can( 'manage_options' ) ) wp_send_json_error( 'forbidden', 403 );
+    $enabled = ( $_POST['enabled'] ?? '0' ) === '1' ? '1' : '0';
+    update_option( 'lion_liontrack_enabled', $enabled );
+    // AIDEV-NOTE: Invalida cache do token tambem — assim proximo pageview ja pega novo estado
+    delete_transient( 'lion_liontrack_token' );
+    wp_send_json_success( [ 'enabled' => $enabled ] );
+});
+
 add_action( 'wp_ajax_lion_test_connection', function() {
     check_ajax_referer( 'lion_admin_nonce', 'nonce' );
     if ( ! current_user_can( 'manage_options' ) ) wp_send_json_error( 'forbidden', 403 );
@@ -967,18 +980,82 @@ function lion_render_main_page() {
                 <p class="lion-card-desc">Rastreie automaticamente o comportamento dos visitantes no site: páginas visitadas, tempo em cada página, origem da visita e presença online em tempo real.</p>
                 <div class="lion-field">
                     <?php // AIDEV-NOTE: NAO usar <label> aqui — labels propagam click pro 1o checkbox dentro,
-                    // resultando em duplo toggle (onclick do span + label propagando). Usar <div>. ?>
+                    // resultando em duplo toggle. Usar <div>. AUTO-SAVE via AJAX no click. ?>
                     <div style="display: flex; align-items: center; gap: 12px;">
                         <?php $lt_on = get_option( 'lion_liontrack_enabled' ) === '1'; ?>
-                        <input type="hidden" name="lion_liontrack_enabled" value="0" />
-                        <input type="checkbox" name="lion_liontrack_enabled" value="1" id="lion_liontrack_toggle" <?php checked( $lt_on ); ?> style="display:none;" />
-                        <span onclick="event.stopPropagation(); var c=document.getElementById('lion_liontrack_toggle'); c.checked=!c.checked; this.classList.toggle('lion-toggle-on', c.checked); this.nextElementSibling.textContent = c.checked ? 'Rastreamento ativado' : 'Rastreamento desativado';" class="lion-toggle <?php echo $lt_on ? 'lion-toggle-on' : ''; ?>" style="display:inline-block; width:44px; height:24px; border-radius:12px; background:<?php echo $lt_on ? '#22c55e' : '#94a3b8'; ?>; position:relative; transition:background .2s; cursor:pointer; flex-shrink:0;">
+                        <input type="hidden" name="lion_liontrack_enabled" value="<?php echo $lt_on ? '1' : '0'; ?>" id="lion_liontrack_hidden" />
+                        <input type="checkbox" id="lion_liontrack_toggle" <?php checked( $lt_on ); ?> style="display:none;" />
+                        <span id="lion_liontrack_toggle_visual" class="lion-toggle <?php echo $lt_on ? 'lion-toggle-on' : ''; ?>" style="display:inline-block; width:44px; height:24px; border-radius:12px; background:<?php echo $lt_on ? '#22c55e' : '#94a3b8'; ?>; position:relative; transition:background .2s; cursor:pointer; flex-shrink:0;">
                             <span style="display:block; width:20px; height:20px; border-radius:50%; background:#fff; position:absolute; top:2px; left:<?php echo $lt_on ? '22px' : '2px'; ?>; transition:left .2s; box-shadow:0 1px 3px rgba(0,0,0,.2);"></span>
                         </span>
-                        <span style="font-weight:500;"><?php echo $lt_on ? 'Rastreamento ativado' : 'Rastreamento desativado'; ?></span>
+                        <span id="lion_liontrack_toggle_label" style="font-weight:500;"><?php echo $lt_on ? 'Rastreamento ativado' : 'Rastreamento desativado'; ?></span>
+                        <span id="lion_liontrack_toggle_status" style="font-size:13px; color:#22c55e; opacity:0; transition:opacity .2s; margin-left:6px;">
+                            <span class="dashicons dashicons-yes" style="font-size:16px; width:16px; height:16px; vertical-align:middle;"></span>
+                            Salvo
+                        </span>
                     </div>
-                    <div class="hint" style="margin-top:8px;">Quando ativado, o script LionTrack é carregado automaticamente em todas as páginas do site.</div>
+                    <div class="hint" style="margin-top:8px;">Quando ativado, o script LionTrack é carregado automaticamente em todas as páginas do site. <strong>Auto-salva ao clicar no botao.</strong></div>
                 </div>
+                <script>
+                    (function() {
+                        // AIDEV-NOTE: Auto-save do toggle LionTrack via AJAX. Sem precisar
+                        // do botao "Salvar Configuracoes" — UX igual app moderno.
+                        var visual = document.getElementById('lion_liontrack_toggle_visual');
+                        var checkbox = document.getElementById('lion_liontrack_toggle');
+                        var hidden = document.getElementById('lion_liontrack_hidden');
+                        var label = document.getElementById('lion_liontrack_toggle_label');
+                        var status = document.getElementById('lion_liontrack_toggle_status');
+                        if (!visual || !checkbox) return;
+
+                        var saving = false;
+                        visual.addEventListener('click', function(e) {
+                            e.stopPropagation();
+                            if (saving) return;
+                            saving = true;
+
+                            var newState = !checkbox.checked;
+                            // Atualiza visual imediato (otimistico)
+                            checkbox.checked = newState;
+                            hidden.value = newState ? '1' : '0';
+                            visual.classList.toggle('lion-toggle-on', newState);
+                            label.textContent = newState ? 'Rastreamento ativado' : 'Rastreamento desativado';
+
+                            // Chama AJAX pra persistir
+                            var fd = new FormData();
+                            fd.append('action', 'lion_save_liontrack_toggle');
+                            fd.append('nonce', '<?php echo esc_js( wp_create_nonce( "lion_admin_nonce" ) ); ?>');
+                            fd.append('enabled', newState ? '1' : '0');
+
+                            fetch('<?php echo esc_js( admin_url( "admin-ajax.php" ) ); ?>', {
+                                method: 'POST',
+                                body: fd,
+                                credentials: 'same-origin'
+                            })
+                            .then(function(r) { return r.json(); })
+                            .then(function(res) {
+                                if (res && res.success) {
+                                    // Mostra "Salvo" por 2s
+                                    status.style.opacity = '1';
+                                    setTimeout(function() { status.style.opacity = '0'; }, 2000);
+                                } else {
+                                    // Reverte se falhou
+                                    checkbox.checked = !newState;
+                                    hidden.value = !newState ? '1' : '0';
+                                    visual.classList.toggle('lion-toggle-on', !newState);
+                                    label.textContent = !newState ? 'Rastreamento ativado' : 'Rastreamento desativado';
+                                    alert('Falha ao salvar. Tente novamente.');
+                                }
+                            })
+                            .catch(function() {
+                                checkbox.checked = !newState;
+                                hidden.value = !newState ? '1' : '0';
+                                visual.classList.toggle('lion-toggle-on', !newState);
+                                label.textContent = !newState ? 'Rastreamento ativado' : 'Rastreamento desativado';
+                            })
+                            .finally(function() { saving = false; });
+                        });
+                    })();
+                </script>
             </div>
             <?php endif; ?>
             <style>
