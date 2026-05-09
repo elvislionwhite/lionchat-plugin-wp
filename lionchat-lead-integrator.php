@@ -2,7 +2,7 @@
 /**
  * Plugin Name: LionChat Lead Integrator
  * Description: Integração nativa WordPress/Elementor com o LionChat — tags, inboxes, respostas prontas, templates WhatsApp Cloud API, automações, fluxos do Flow Builder e captura de UTMs/cliques de anúncio.
- * Version: 2.9
+ * Version: 3.0
  * Author: LionChat
  * Author URI: https://lionchat.com.br
  * Text Domain: lionchat-lead
@@ -11,7 +11,7 @@
 
 if ( ! defined( 'ABSPATH' ) ) exit;
 
-define( 'LION_VERSION', '2.9' );
+define( 'LION_VERSION', '3.0' );
 
 // ============================================================
 // AUTO-UPDATE — checa GitHub Releases e oferece atualizacao
@@ -966,15 +966,17 @@ function lion_render_main_page() {
                 <h2 class="lion-card-title"><span class="dashicons dashicons-chart-area"></span> LionTrack — Rastreamento de Visitantes</h2>
                 <p class="lion-card-desc">Rastreie automaticamente o comportamento dos visitantes no site: páginas visitadas, tempo em cada página, origem da visita e presença online em tempo real.</p>
                 <div class="lion-field">
-                    <label style="display: flex; align-items: center; gap: 12px; cursor: pointer;">
+                    <?php // AIDEV-NOTE: NAO usar <label> aqui — labels propagam click pro 1o checkbox dentro,
+                    // resultando em duplo toggle (onclick do span + label propagando). Usar <div>. ?>
+                    <div style="display: flex; align-items: center; gap: 12px;">
                         <?php $lt_on = get_option( 'lion_liontrack_enabled' ) === '1'; ?>
                         <input type="hidden" name="lion_liontrack_enabled" value="0" />
                         <input type="checkbox" name="lion_liontrack_enabled" value="1" id="lion_liontrack_toggle" <?php checked( $lt_on ); ?> style="display:none;" />
-                        <span onclick="document.getElementById('lion_liontrack_toggle').click(); this.classList.toggle('lion-toggle-on');" class="lion-toggle <?php echo $lt_on ? 'lion-toggle-on' : ''; ?>" style="display:inline-block; width:44px; height:24px; border-radius:12px; background:<?php echo $lt_on ? '#22c55e' : '#94a3b8'; ?>; position:relative; transition:background .2s; cursor:pointer; flex-shrink:0;">
+                        <span onclick="event.stopPropagation(); var c=document.getElementById('lion_liontrack_toggle'); c.checked=!c.checked; this.classList.toggle('lion-toggle-on', c.checked); this.nextElementSibling.textContent = c.checked ? 'Rastreamento ativado' : 'Rastreamento desativado';" class="lion-toggle <?php echo $lt_on ? 'lion-toggle-on' : ''; ?>" style="display:inline-block; width:44px; height:24px; border-radius:12px; background:<?php echo $lt_on ? '#22c55e' : '#94a3b8'; ?>; position:relative; transition:background .2s; cursor:pointer; flex-shrink:0;">
                             <span style="display:block; width:20px; height:20px; border-radius:50%; background:#fff; position:absolute; top:2px; left:<?php echo $lt_on ? '22px' : '2px'; ?>; transition:left .2s; box-shadow:0 1px 3px rgba(0,0,0,.2);"></span>
                         </span>
                         <span style="font-weight:500;"><?php echo $lt_on ? 'Rastreamento ativado' : 'Rastreamento desativado'; ?></span>
-                    </label>
+                    </div>
                     <div class="hint" style="margin-top:8px;">Quando ativado, o script LionTrack é carregado automaticamente em todas as páginas do site.</div>
                 </div>
             </div>
@@ -2440,3 +2442,217 @@ add_action( 'wpforms_process_complete', function( $fields, $entry, $form_data, $
     }
     lion_process_lead( $form_name, $raw );
 }, 10, 4 );
+
+// ============================================================
+// HOOK: Gravity Forms
+// ============================================================
+add_action( 'gform_after_submission', function( $entry, $form ) {
+    $form_name = 'GravityForms: ' . ( $form['title'] ?? 'Sem nome' );
+    $raw = [];
+    foreach ( ( $form['fields'] ?? [] ) as $field ) {
+        $field_id = $field->id ?? null;
+        if ( $field_id === null ) continue;
+        $label = $field->label ?? "Campo $field_id";
+        $value = $entry[ $field_id ] ?? '';
+        if ( $value === '' || $value === null ) continue;
+        $raw[ $label ] = is_array($value) ? implode(', ', $value) : $value;
+    }
+    lion_process_lead( $form_name, $raw );
+}, 10, 2 );
+
+// ============================================================
+// HOOK: Fluent Forms
+// ============================================================
+add_action( 'fluentform/submission_inserted', function( $entry_id, $form_data, $form ) {
+    $form_name = 'FluentForms: ' . ( $form->title ?? 'Sem nome' );
+    $raw = [];
+    foreach ( (array) $form_data as $key => $value ) {
+        if ( $key[0] === '_' ) continue; // _wpnonce, _ff_csrf, etc
+        if ( is_array($value) ) {
+            $value = implode(', ', array_filter( array_map( 'strval', $value ) ) );
+        }
+        if ( $value === '' || $value === null ) continue;
+        $label = ucfirst( str_replace( [ '-', '_' ], ' ', $key ) );
+        $raw[ $label ] = $value;
+    }
+    lion_process_lead( $form_name, $raw );
+}, 10, 3 );
+
+// ============================================================
+// HOOK: Ninja Forms
+// ============================================================
+add_action( 'ninja_forms_after_submission', function( $form_data ) {
+    $form_name = 'NinjaForms: ' . ( $form_data['settings']['title'] ?? 'Sem nome' );
+    $raw = [];
+    foreach ( ( $form_data['fields'] ?? [] ) as $field ) {
+        $label = $field['label'] ?? $field['key'] ?? 'Campo';
+        $value = $field['value'] ?? '';
+        if ( $value === '' || $value === null ) continue;
+        $raw[ $label ] = is_array($value) ? implode(', ', $value) : $value;
+    }
+    lion_process_lead( $form_name, $raw );
+});
+
+// ============================================================
+// HOOK: Forminator
+// ============================================================
+add_action( 'forminator_custom_form_submit_before_set_fields', function( $entry, $form_id, $field_data_array ) {
+    $form_obj  = class_exists( 'Forminator_API' ) ? Forminator_API::get_form( $form_id ) : null;
+    $form_name = 'Forminator: ' . ( is_object($form_obj) && ! empty( $form_obj->name ) ? $form_obj->name : "ID $form_id" );
+    $raw = [];
+    foreach ( (array) $field_data_array as $field ) {
+        $key   = $field['name'] ?? '';
+        $value = $field['value'] ?? '';
+        if ( $value === '' || $value === null || empty( $key ) ) continue;
+        if ( is_array($value) ) {
+            $value = implode(', ', array_filter( array_map( 'strval', $value ) ) );
+        }
+        $label = ucfirst( str_replace( [ '-', '_' ], ' ', $key ) );
+        $raw[ $label ] = $value;
+    }
+    lion_process_lead( $form_name, $raw );
+}, 10, 3 );
+
+// ============================================================
+// CAPTURA UNIVERSAL: HTML forms / popups customizados / qualquer plugin nao listado
+// AIDEV-NOTE: Listener JS no frontend pega QUALQUER <form> submetido na pagina e
+// envia pro endpoint AJAX abaixo. Skipa forms que ja sao processados pelos hooks
+// nativos (Elementor/CF7/WPForms/GF/Fluent/NF/Forminator) pra evitar duplicacao.
+// Tem rate limit por IP (10 captures/min) e exige email OU telefone no payload.
+// ============================================================
+
+// Endpoint publico (logado E nao-logado) — recebe captura universal do JS
+add_action( 'wp_ajax_lion_universal_form', 'lion_universal_form_handler' );
+add_action( 'wp_ajax_nopriv_lion_universal_form', 'lion_universal_form_handler' );
+
+function lion_universal_form_handler() {
+    // AIDEV-SECURITY: rate limit por IP — previne abuso/spam
+    $ip = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
+    $rate_key = 'lion_uform_rate_' . md5( $ip );
+    $count = (int) get_transient( $rate_key );
+    if ( $count >= 10 ) {
+        wp_send_json_error( 'rate_limited', 429 );
+    }
+    set_transient( $rate_key, $count + 1, MINUTE_IN_SECONDS );
+
+    $form_name = sanitize_text_field( $_POST['form_name'] ?? 'HTML Form' );
+    $form_name = 'HTMLCustom: ' . substr( $form_name, 0, 80 );
+
+    // Sanitiza todos os campos (max 50 keys, max 500 chars cada)
+    $raw = [];
+    $fields = $_POST['fields'] ?? [];
+    if ( ! is_array( $fields ) ) {
+        wp_send_json_error( 'invalid_payload', 400 );
+    }
+    $i = 0;
+    foreach ( $fields as $key => $value ) {
+        if ( $i++ >= 50 ) break;
+        $label = sanitize_text_field( substr( (string) $key, 0, 100 ) );
+        $val   = is_array( $value ) ? implode( ', ', array_map( 'sanitize_text_field', $value ) ) : sanitize_text_field( (string) $value );
+        $val   = substr( $val, 0, 500 );
+        if ( $val === '' || $label === '' ) continue;
+        $raw[ $label ] = $val;
+    }
+
+    // Exige email ou telefone — sem isso nao tem como criar contato no LionChat
+    $has_email_or_phone = false;
+    foreach ( $raw as $k => $v ) {
+        $lk = strtolower( $k );
+        if ( strpos( $lk, 'mail' ) !== false && strpos( $v, '@' ) > 0 ) { $has_email_or_phone = true; break; }
+        if ( preg_match( '/(tel|cel|whats|fone|phone)/', $lk ) ) { $has_email_or_phone = true; break; }
+    }
+    if ( ! $has_email_or_phone ) {
+        wp_send_json_error( 'no_contact_data', 400 );
+    }
+
+    lion_process_lead( $form_name, $raw );
+    wp_send_json_success();
+}
+
+// JS listener — colocado junto com o LionTrack identify (linha ~192)
+// Skipa forms ja processados por hooks nativos (verifica classes/atributos)
+add_action( 'wp_footer', function() {
+    if ( get_option( 'lion_url' ) === '' || get_option( 'lion_acc' ) === '' ) return;
+    $ajax_url = esc_url( admin_url( 'admin-ajax.php' ) );
+    ?>
+    <script>
+    (function() {
+        // AIDEV-NOTE: Lista de seletores de forms processados pelos hooks PHP nativos.
+        // Universal capture skipa esses pra evitar lead duplicado.
+        var KNOWN_FORM_SELECTORS = [
+            '.wpcf7-form',                  // Contact Form 7
+            '.gform_wrapper form',          // Gravity Forms
+            '.wpforms-form',                // WPForms
+            '.elementor-form',              // Elementor Pro
+            '.frm-fluent-form',             // Fluent Forms
+            '.fluentform',                  // Fluent Forms (alt)
+            '.nf-form-cont',                // Ninja Forms
+            '.forminator-custom-form'       // Forminator
+        ];
+
+        function isKnownPluginForm(form) {
+            for (var i = 0; i < KNOWN_FORM_SELECTORS.length; i++) {
+                if (form.matches(KNOWN_FORM_SELECTORS[i])) return true;
+                if (form.closest(KNOWN_FORM_SELECTORS[i])) return true;
+            }
+            return false;
+        }
+
+        function isSearchOrLogin(form) {
+            if (form.role === 'search') return true;
+            var action = (form.action || '').toLowerCase();
+            return action.indexOf('wp-login.php') > -1 ||
+                   action.indexOf('?s=') > -1 ||
+                   form.querySelector('input[name="log"]') !== null;
+        }
+
+        document.addEventListener('submit', function(e) {
+            var form = e.target;
+            if (!form || form.tagName !== 'FORM') return;
+            if (isKnownPluginForm(form)) return;
+            if (isSearchOrLogin(form)) return;
+
+            var fields = {};
+            var hasEmailOrPhone = false;
+            var inputs = form.querySelectorAll('input, select, textarea');
+            for (var i = 0; i < inputs.length; i++) {
+                var el = inputs[i];
+                var name = (el.name || el.id || el.placeholder || '').toLowerCase();
+                if (!name || el.type === 'hidden' || el.type === 'submit' || el.type === 'button') continue;
+                var val = (el.value || '').trim();
+                if (!val) continue;
+                fields[name] = val;
+                if (/mail/.test(name) && val.indexOf('@') > 0) hasEmailOrPhone = true;
+                if (/tel|cel|whats|fone|phone/.test(name)) hasEmailOrPhone = true;
+            }
+            if (!hasEmailOrPhone) return;
+
+            // Nome do form: pega data-form-name, name, id, ou primeira class util
+            var formName = form.getAttribute('data-form-name') ||
+                           form.getAttribute('name') ||
+                           form.id ||
+                           form.className.split(' ')[0] ||
+                           'unnamed';
+
+            // POST async — nao bloqueia o submit do form
+            var fd = new FormData();
+            fd.append('action', 'lion_universal_form');
+            fd.append('form_name', formName);
+            for (var k in fields) {
+                if (Object.prototype.hasOwnProperty.call(fields, k)) {
+                    fd.append('fields[' + k + ']', fields[k]);
+                }
+            }
+            try {
+                fetch('<?php echo $ajax_url; ?>', {
+                    method: 'POST',
+                    body: fd,
+                    credentials: 'omit',
+                    keepalive: true
+                });
+            } catch (err) { /* silent */ }
+        }, true);
+    })();
+    </script>
+    <?php
+}, 999 );
